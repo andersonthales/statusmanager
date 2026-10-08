@@ -2,6 +2,12 @@
 
 Histórico reconstruído a partir das versões encontradas nos servidores.
 
+## [3.4.3] - 2026-10-08
+### Corrigido
+- Aplicar e reverter patches agora exigem POST com token CSRF. Antes eram links GET: uma página externa aberta por um administrador logado podia alterar o core
+- Backup renovado a cada aplicação do patch. Antes, um `.bak` de uma versão anterior do GLPI era mantido e, ao reverter ou desinstalar, restaurado por cima do GLPI atualizado
+- Reverter não restaura o backup sobre um arquivo que já não tem patch
+
 ## [3.4.2] - 2026-08-27
 - Versão em produção no GLPI 11.0.8.
 

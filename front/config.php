@@ -48,20 +48,24 @@ $base = Plugin::getWebDir('statusmanager');
     </h2>
     <div class="d-flex gap-2 align-items-center flex-wrap">
       <?php if (!$isPatchApplied): ?>
-        <a href="<?php echo $base; ?>/front/patch.php?action=apply"
-           class="btn btn-warning"
-           onclick="return confirm('Aplicar patches nos arquivos do core GLPI?\nUm backup automático será criado antes de cada modificação.')">
-          <i class="fas fa-magic me-1"></i>Aplicar patches no core
-        </a>
+        <form method="post" action="<?php echo $base; ?>/front/patch.php" class="d-inline"
+              onsubmit="return confirm('Aplicar patches nos arquivos do core GLPI?\nUm backup automático será criado antes de cada modificação.')">
+          <input type="hidden" name="_glpi_csrf_token" value="<?php echo Session::getNewCSRFToken(); ?>">
+          <button type="submit" name="action" value="apply" class="btn btn-warning">
+            <i class="fas fa-magic me-1"></i>Aplicar patches no core
+          </button>
+        </form>
       <?php else: ?>
         <span class="badge bg-success fs-6 p-2">
           <i class="fas fa-check-circle me-1"></i>Core patcheado
         </span>
-        <a href="<?php echo $base; ?>/front/patch.php?action=revert"
-           class="btn btn-outline-danger btn-sm"
-           onclick="return confirm('Reverter patches? Os backups serão restaurados.')">
-          <i class="fas fa-undo me-1"></i>Reverter
-        </a>
+        <form method="post" action="<?php echo $base; ?>/front/patch.php" class="d-inline"
+              onsubmit="return confirm('Reverter patches? Os backups serão restaurados.')">
+          <input type="hidden" name="_glpi_csrf_token" value="<?php echo Session::getNewCSRFToken(); ?>">
+          <button type="submit" name="action" value="revert" class="btn btn-outline-danger btn-sm">
+            <i class="fas fa-undo me-1"></i>Reverter
+          </button>
+        </form>
       <?php endif; ?>
       <a href="<?php echo $base; ?>/front/native.php" class="btn btn-outline-secondary">
         <i class="fas fa-sliders-h me-1"></i>Gerenciar nativos

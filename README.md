@@ -4,7 +4,7 @@ Cria **status personalizados de chamado** pelo painel do GLPI e permite **renome
 
 | | |
 |---|---|
-| **Versão** | 3.4.2 |
+| **Versão** | 3.4.3 |
 | **GLPI** | 10.0.x e 11.0.x (em produção no 11.0.8) |
 | **PHP** | 7.4+ no GLPI 10 · 8.2+ no GLPI 11 |
 | **Licença** | GPLv3+ |
@@ -71,13 +71,14 @@ Em **Configurar → Plugins → Status Manager** (requer *Configuração → Atu
 
 ### Ao atualizar o GLPI
 
-A atualização substitui os arquivos de `src/` e **apaga os patches**: os status personalizados somem do seletor e dos dashboards (os chamados mantêm o número gravado). Depois de atualizar:
+A atualização substitui os arquivos de `src/` e **apaga os patches**: os status personalizados somem do seletor e dos dashboards (os chamados mantêm o número gravado). Depois de atualizar, volte à configuração do plugin e clique em **Aplicar patches no core**.
 
-1. **Apague os backups antigos.** Eles são da versão anterior do GLPI, e restaurá-los quebraria a instalação nova:
-   ```bash
-   find /var/www/html/glpi/src -name '*.statusmanager.bak' -delete
-   ```
-2. Volte à configuração do plugin e clique em **Aplicar patches no core**.
+Os backups `.statusmanager.bak` que sobraram da versão anterior do GLPI são substituídos automaticamente ao reaplicar, e nunca são restaurados sobre um arquivo sem patch.
+
+> Em versões **anteriores à 3.4.3**, apague esses backups antigos antes de reaplicar ou reverter, porque restaurá-los quebraria a instalação nova:
+> ```bash
+> find /var/www/html/glpi/src -name '*.statusmanager.bak' -delete
+> ```
 
 ## Recuperação de emergência
 

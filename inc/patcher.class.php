@@ -68,10 +68,17 @@ class PluginStatusmanagerPatcher {
                 continue;
             }
             $bak = $file . '.statusmanager.bak';
-            if (file_exists($bak)) {
-                copy($bak, $file);
-                unlink($bak);
+            if (!file_exists($bak)) {
+                continue;
             }
+            // Só restaura se o arquivo atual ainda tem o patch. Sem a marca,
+            // o arquivo já é original — tipicamente porque o GLPI foi
+            // atualizado — e o backup é de uma versão ANTERIOR do GLPI:
+            // copiá-lo por cima quebraria a instalação.
+            if (strpos(file_get_contents($file), '[StatusManager]') !== false) {
+                copy($bak, $file);
+            }
+            unlink($bak);
         }
     }
 
@@ -116,13 +123,15 @@ class PluginStatusmanagerPatcher {
     }
 
     /**
-     * Faz backup do arquivo (apenas na primeira vez, não sobrescreve backup existente).
+     * Faz backup do arquivo antes de aplicar o patch.
+     *
+     * Só é chamado quando o arquivo NÃO tem a marca [StatusManager], ou seja,
+     * está original. Por isso o backup é sempre renovado: um .bak que já
+     * exista nesse ponto sobrou de uma versão anterior do GLPI (a atualização
+     * troca src/ mas não apaga os .bak) e não pode ser mantido.
      */
     private static function backup($file) {
-        $bak = $file . '.statusmanager.bak';
-        if (!file_exists($bak)) {
-            copy($file, $bak);
-        }
+        copy($file, $file . '.statusmanager.bak');
     }
 
     /**
