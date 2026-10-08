@@ -1,0 +1,17 @@
+# Backups gerados pelo patcher
+*.statusmanager.bak
+*.customstatus.bak
+*.bak
+
+# Sistema
+.DS_Store
+Thumbs.db
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# PHP
+*.log
