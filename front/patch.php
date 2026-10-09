@@ -7,8 +7,15 @@
 include('../../../inc/includes.php');
 Session::checkRight('config', UPDATE);
 
-$action = isset($_GET['action']) ? $_GET['action'] : '';
-$base   = Plugin::getWebDir('statusmanager');
+$base = Plugin::getWebDir('statusmanager');
+
+// Só aceita POST: o GLPI valida o token CSRF apenas em POST, e esta ação
+// reescreve arquivos do core. Via GET, bastaria um link ou <img> numa página
+// qualquer, aberta por um administrador logado, para aplicar ou reverter.
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    Html::redirect($base . '/front/config.php');
+}
+$action = isset($_POST['action']) ? $_POST['action'] : '';
 
 try {
     if ($action === 'apply') {

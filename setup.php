@@ -12,7 +12,7 @@
  * ---------------------------------------------------------------------
  */
 
-define('PLUGIN_STATUSMANAGER_VERSION',  '3.4.2');
+define('PLUGIN_STATUSMANAGER_VERSION',  '3.4.3');
 define('PLUGIN_STATUSMANAGER_MIN_GLPI', '10.0.0');
 define('PLUGIN_STATUSMANAGER_MAX_GLPI', '11.1.99');
 define('PLUGIN_STATUSMANAGER_KEY_OFFSET', 200); // status_keys dos custom começam aqui
