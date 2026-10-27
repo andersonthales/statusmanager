@@ -20,6 +20,7 @@ Histórico reconstruído a partir das versões encontradas nos servidores.
 ### Corrigido
 - GLPI 10: o ícone dos status personalizados nunca aparecia, porque a âncora de `getStatusClass` era a do GLPI 11. Mesmo assim, o relatório marcava o arquivo como patcheado
 - O formulário dizia "criado com sucesso" mesmo quando a gravação falhava
+- Tabelas do plugin criadas com `id` INT signed e datas DATETIME, o que fazia o GLPI pedir `migration:unsigned_keys` e `migration:timestamps`. Agora são criadas com `INT unsigned` e `TIMESTAMP`, e instalações antigas são convertidas ao atualizar o plugin
 - Ícone padrão de um status novo no GLPI 11 era Font Awesome (`fas fa-circle`), que não desenha. Agora usa o primeiro da lista Tabler
 
 ## [3.4.3] - 2026-10-08
