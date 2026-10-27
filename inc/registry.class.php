@@ -198,6 +198,73 @@ class PluginStatusmanagerRegistry {
         return null;
     }
 
+    /**
+     * Indica se há algo cadastrado que dependa dos patches no core
+     * (status personalizados ativos ou overrides de nativos).
+     *
+     * @return bool
+     */
+    public static function hasConfiguration() {
+        self::load();
+        return !empty(self::$statuses) || !empty(self::$nativeOverrides);
+    }
+
+    /**
+     * Classe CSS completa de um ícone, pronta para o atributo class.
+     *
+     * Mesma regra do statusmanager.js: o Tabler exige a classe base `ti`
+     * junto do `ti-*`; o Font Awesome do GLPI 10 já vem como `fas fa-*`.
+     * Qualquer caractere fora de [a-z0-9 _-] é descartado, porque o valor
+     * vai direto para HTML.
+     *
+     * @param string $icon
+     * @return string
+     */
+    public static function iconClass($icon) {
+        $icon = trim(preg_replace('/[^a-zA-Z0-9 _-]/', '', (string)$icon));
+        if (strpos($icon, 'ti-') === 0) {
+            return 'ti ' . $icon;
+        }
+        return $icon;
+    }
+
+    /**
+     * Status gravados em chamados que nem o GLPI nem o plugin conhecem.
+     *
+     * Caso típico: base migrada de uma instalação que tinha status
+     * criados editando o core (ex.: 101–112). Os chamados chegam com o
+     * número, mas sem cadastro aparecem sem nome e somem dos filtros.
+     *
+     * @return array<int, array{count: int, last: string|null}> status_key => uso
+     */
+    public static function getUnknownTicketStatuses() {
+        global $DB;
+
+        $known = array();
+        foreach ($DB->request(array(
+            'SELECT' => array('status_key'),
+            'FROM'   => 'glpi_plugin_statusmanager_statuses',
+        )) as $row) {
+            $known[] = (int)$row['status_key'];
+        }
+
+        $result = array();
+        foreach ($DB->request(array(
+            'SELECT'  => array('status', 'COUNT' => 'id AS cpt', 'MAX' => 'date_mod AS last'),
+            'FROM'    => 'glpi_tickets',
+            'WHERE'   => array('status' => array('>', 14)),
+            'GROUPBY' => 'status',
+            'ORDER'   => 'status',
+        )) as $row) {
+            $key = (int)$row['status'];
+            if (in_array($key, $known, true)) {
+                continue;
+            }
+            $result[$key] = array('count' => (int)$row['cpt'], 'last' => $row['last']);
+        }
+        return $result;
+    }
+
     // -------------------------------------------------------------------------
     // Geração de CSS/JS dinâmico
     // -------------------------------------------------------------------------

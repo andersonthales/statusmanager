@@ -16,7 +16,8 @@ if (isset($_POST['save'])) {
     $name      = trim(isset($_POST['name'])       ? $_POST['name']       : '');
     $colorRaw  = trim(isset($_POST['color_text']) ? $_POST['color_text'] : (isset($_POST['color']) ? $_POST['color'] : '#0070c0'));
     $color     = preg_match('/^#[0-9a-fA-F]{3,6}$/', $colorRaw) ? $colorRaw : '#0070c0';
-    $icon      = trim(isset($_POST['icon'])       ? $_POST['icon']       : 'fas fa-circle');
+    $icons     = PluginStatusmanagerStatus::getIconOptions();
+    $icon      = trim(isset($_POST['icon'])       ? $_POST['icon']       : key($icons));
     $bhv       = isset($_POST['behavior'])        ? $_POST['behavior']   : 'pending';
     $behavior  = in_array($bhv, array('assigned', 'pending', 'solved', 'closed')) ? $bhv : 'pending';
     $rank      = max(1, (int)(isset($_POST['rank'])       ? $_POST['rank']       : 99));
@@ -41,26 +42,30 @@ if (isset($_POST['save'])) {
         'date_mod'   => date('Y-m-d H:i:s'),
     );
 
+    // A validação (faixa e unicidade da chave, chave imutável, cor, ícone)
+    // fica em PluginStatusmanagerStatus::prepareInputFor*; quando recusa,
+    // a mensagem de erro já foi registrada e o formulário volta.
     if ($id > 0) {
         $data['id'] = $id;
-        $s->update($data);
+        if (!$s->update($data)) {
+            Html::redirect($base . '/front/status.form.php?id=' . $id);
+            exit;
+        }
         Session::addMessageAfterRedirect(
             'Status "' . $name . '" atualizado com sucesso.',
             false, INFO
         );
     } else {
         $data['date_creation'] = date('Y-m-d H:i:s');
-        $s->add($data);
+        if (!$s->add($data)) {
+            Html::redirect($base . '/front/status.form.php?id=-1');
+            exit;
+        }
         Session::addMessageAfterRedirect(
             'Status "' . $name . '" criado (chave: ' . $skey . ').',
             false, INFO
         );
     }
-
-    // Invalida cache do registry para refletir as mudanças imediatamente
-    PluginStatusmanagerRegistry::reload();
-    // GLPI 11: sem isso o status existe no core mas o formulário o filtra
-    PluginStatusmanagerRegistry::syncTemplateAllowedStatuses();
 
     Html::redirect($base . '/front/config.php');
     exit;
@@ -71,8 +76,6 @@ if (isset($_POST['purge'])) {
     $id = (int)(isset($_POST['id']) ? $_POST['id'] : 0);
     if ($id > 0) {
         $s->delete(array('id' => $id), true);
-        PluginStatusmanagerRegistry::reload();
-        PluginStatusmanagerRegistry::syncTemplateAllowedStatuses();
         Session::addMessageAfterRedirect('Status removido com sucesso.', false, INFO);
     }
     Html::redirect($base . '/front/config.php');

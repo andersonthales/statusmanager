@@ -49,6 +49,30 @@ function plugin_statusmanager_install() {
     return true;
 }
 
+/**
+ * Aviso no painel central para quem administra a configuração.
+ *
+ * Sem os patches, os status do plugin continuam gravados nos chamados mas
+ * somem de dropdowns, filtros, dashboards e da contagem de SLA — e nada
+ * avisa. O caso mais comum é atualizar o GLPI, que substitui o src/.
+ */
+function plugin_statusmanager_display_central() {
+    if (!Session::haveRight('config', UPDATE)
+        || !class_exists('PluginStatusmanagerPatcher')
+        || !PluginStatusmanagerRegistry::hasConfiguration()
+        || PluginStatusmanagerPatcher::isApplied()) {
+        return;
+    }
+    $url = Plugin::getWebDir('statusmanager') . '/front/config.php';
+    echo '<div class="alert alert-warning m-2">'
+        . '<strong>Status Manager:</strong> os patches no core do GLPI não estão completos '
+        . '(provavelmente o GLPI foi atualizado). Os status personalizados não aparecem '
+        . 'corretamente nem pausam o SLA até reaplicar. '
+        . '<a href="' . htmlspecialchars($url, ENT_QUOTES, 'UTF-8') . '">Abrir o Status Manager</a> '
+        . 'ou rodar <code>php bin/console plugins:statusmanager:patch apply</code>.'
+        . '</div>';
+}
+
 function plugin_statusmanager_uninstall() {
     global $DB;
 
