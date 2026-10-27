@@ -51,6 +51,112 @@ class PluginStatusmanagerStatus extends CommonDBTM {
     }
 
     /**
+     * Faixa aceita para status_key. Abaixo de 100 ficam os nativos do GLPI
+     * (1–14) com folga para novos; 100–199 só para adotar chaves já
+     * gravadas em chamados; novos começam em PLUGIN_STATUSMANAGER_KEY_OFFSET.
+     */
+    const KEY_MIN = 100;
+    const KEY_MAX = 9999;
+
+    public function prepareInputForAdd($input) {
+        $input = $this->validateCommon($input);
+        if ($input === false) {
+            return false;
+        }
+
+        if (!isset($input['status_key'])) {
+            $input['status_key'] = self::getNextStatusKey();
+        }
+        $key = (int)$input['status_key'];
+        if ($key < self::KEY_MIN || $key > self::KEY_MAX) {
+            Session::addMessageAfterRedirect(
+                sprintf('Chave interna %d fora da faixa permitida (%d–%d).', $key, self::KEY_MIN, self::KEY_MAX),
+                false, ERROR
+            );
+            return false;
+        }
+        if (countElementsInTable(static::getTable(), array('status_key' => $key)) > 0) {
+            Session::addMessageAfterRedirect(
+                sprintf('Já existe um status com a chave interna %d.', $key),
+                false, ERROR
+            );
+            return false;
+        }
+        $input['status_key'] = $key;
+        return $input;
+    }
+
+    public function prepareInputForUpdate($input) {
+        // A chave é o valor gravado em glpi_tickets.status: trocá-la deixaria
+        // todos os chamados com a chave antiga sem nome nem comportamento.
+        if (isset($input['status_key']) && (int)$input['status_key'] !== (int)$this->fields['status_key']) {
+            Session::addMessageAfterRedirect(
+                'A chave interna não pode ser alterada depois de criada.',
+                false, ERROR
+            );
+            return false;
+        }
+        unset($input['status_key']);
+        return $this->validateCommon($input);
+    }
+
+    /**
+     * Depois de qualquer gravação — formulário, assistente, API —, o cache
+     * é recarregado e a lista branca dos templates (GLPI 11) sincronizada.
+     * Sem o sync, o status existe mas o GLPI recusa gravá-lo nos chamados.
+     */
+    public function post_addItem() {
+        self::afterChange();
+    }
+
+    public function post_updateItem($history = true) {
+        self::afterChange();
+    }
+
+    public function post_purgeItem() {
+        self::afterChange();
+    }
+
+    private static function afterChange() {
+        PluginStatusmanagerRegistry::reload();
+        PluginStatusmanagerRegistry::syncTemplateAllowedStatuses();
+    }
+
+    /**
+     * Validação dos campos comuns a criação e edição. Só valida o que veio
+     * no input, para permitir atualizações parciais (ex.: só is_active).
+     *
+     * @return array|false
+     */
+    private function validateCommon($input) {
+        if (isset($input['name'])) {
+            $input['name'] = trim($input['name']);
+            if ($input['name'] === '') {
+                Session::addMessageAfterRedirect('O nome do status é obrigatório.', false, ERROR);
+                return false;
+            }
+        }
+        if (isset($input['behavior']) && !array_key_exists($input['behavior'], self::getBehaviorOptions())) {
+            Session::addMessageAfterRedirect('Comportamento inválido.', false, ERROR);
+            return false;
+        }
+        if (isset($input['color']) && !preg_match('/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/', $input['color'])) {
+            Session::addMessageAfterRedirect('Cor inválida: use o formato #rrggbb.', false, ERROR);
+            return false;
+        }
+        // O ícone vai para o atributo class do HTML (getStatusClass, CSS e
+        // dropdown): só classes CSS simples.
+        if (isset($input['icon']) && !preg_match('/^[a-z][a-z0-9 _-]{0,99}$/i', trim($input['icon']))) {
+            Session::addMessageAfterRedirect('Ícone inválido: informe só classes CSS (ex.: ti-circle ou fas fa-circle).', false, ERROR);
+            return false;
+        }
+        if (isset($input['icon'])) {
+            $input['icon'] = trim($input['icon']);
+        }
+        return $input;
+    }
+
+    /**
      * Retorna o próximo status_key disponível.
      *
      * @return int
@@ -153,7 +259,8 @@ class PluginStatusmanagerStatus extends CommonDBTM {
 
         $name     = $isNew ? '' : $this->fields['name'];
         $color    = $isNew ? '#0070c0' : $this->fields['color'];
-        $icon     = $isNew ? 'fas fa-circle' : $this->fields['icon'];
+        $icons    = self::getIconOptions();
+        $icon     = $isNew ? key($icons) : $this->fields['icon'];
         $behavior = $isNew ? 'pending' : $this->fields['behavior'];
         $rank     = $isNew ? 99 : (int)$this->fields['rank'];
         $active   = $isNew ? 1 : (int)$this->fields['is_active'];
@@ -203,7 +310,7 @@ class PluginStatusmanagerStatus extends CommonDBTM {
         echo '<div class="col-sm-9">';
         echo '<div class="d-flex gap-2 align-items-center">';
         echo '<select name="icon_select" id="sm_icon_select" class="form-select" style="max-width:280px;">';
-        foreach (self::getIconOptions() as $val => $lbl) {
+        foreach ($icons as $val => $lbl) {
             $selected = ($icon === $val) ? ' selected' : '';
             echo '<option value="' . htmlspecialchars($val, ENT_QUOTES, 'UTF-8') . '"' . $selected . '>'
                 . htmlspecialchars($lbl, ENT_QUOTES, 'UTF-8') . '</option>';
@@ -212,10 +319,11 @@ class PluginStatusmanagerStatus extends CommonDBTM {
         echo '<span id="sm_icon_preview" style="font-size:1.8rem;width:40px;text-align:center;">'
             . '<i class="' . $iconSafe . '"></i></span>';
         echo '</div>';
-        echo '<small class="text-muted d-block mt-2">Ou informe uma classe Font Awesome personalizada:</small>';
+        $iconLib = version_compare(GLPI_VERSION, '11.0.0', '>=') ? 'Tabler (ex.: ti-circle)' : 'Font Awesome (ex.: fas fa-circle)';
+        echo '<small class="text-muted d-block mt-2">Ou informe uma classe ' . $iconLib . ':</small>';
         echo '<input type="text" name="icon" id="sm_icon_custom" class="form-control mt-1"'
             . ' style="max-width:280px;"'
-            . ' value="' . $iconSafe . '" placeholder="fas fa-circle">';
+            . ' value="' . $iconSafe . '" placeholder="' . htmlspecialchars(key($icons), ENT_QUOTES, 'UTF-8') . '">';
         echo '</div></div>';
 
         // ── Comportamento ─────────────────────────────────────────────────────

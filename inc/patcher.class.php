@@ -7,24 +7,32 @@
  * Aplica e reverte patches cirúrgicos nos arquivos do core do GLPI,
  * criando backup automático antes de cada modificação.
  *
- * Arquivos patcheados (o caminho varia entre GLPI 10 e 11):
+ * Arquivos patcheados (o caminho varia entre GLPI 10 e 11/12):
  *   1. src/Ticket.php                          – getAllStatusArray, getClosedStatusArray,
  *                                                getSolvedStatusArray, getProcessStatusArray
- *   2. Dashboard/Provider.php                  – nbTicketsGeneric (default case)
- *        GLPI 10: src/Dashboard/Provider.php
- *        GLPI 11: src/Glpi/Dashboard/Provider.php
- *   3. src/CommonITILObject.php                – getStatusClass (ícones), pausa SLA
+ *   2. Dashboard/Provider.php                  – nbTicketsGeneric (case default)
+ *        GLPI 10:    src/Dashboard/Provider.php
+ *        GLPI 11/12: src/Glpi/Dashboard/Provider.php
+ *   3. src/CommonITILObject.php                – getStatusClass (ícones), pausa e retomada do SLA
  *   4. Barra de progresso do SLA               – oculta em status pending
- *        GLPI 10: src/Search.php
- *        GLPI 11: src/Glpi/Search/Provider/SQLProvider.php
+ *        GLPI 10:    src/Search.php
+ *        GLPI 11/12: src/Glpi/Search/Provider/SQLProvider.php
+ *
+ * Cada alvo é uma lista de trechos. Cada trecho tem uma âncora mínima — uma
+ * linha inteira do core, casada por regex — e o código do plugin entra antes
+ * ou depois dela, com a mesma indentação. A âncora precisa aparecer UMA vez
+ * (dentro do método, quando há método): zero ou mais de uma conta como
+ * ausente. O arquivo só é gravado se TODOS os trechos dele entraram.
  * ---------------------------------------------------------------------
  */
 class PluginStatusmanagerPatcher {
 
+    const MARKER = '[StatusManager]';
+
     /**
      * Caminhos candidatos por alvo, em ordem de tentativa.
      * O primeiro que existir no disco é o usado — assim o mesmo plugin
-     * atende GLPI 10 e 11 sem ramificar por versão.
+     * atende GLPI 10, 11 e 12 sem ramificar por versão.
      */
     private static $targets = array(
         'ticket'   => array('/src/Ticket.php'),
@@ -33,8 +41,11 @@ class PluginStatusmanagerPatcher {
         'search'   => array('/src/Glpi/Search/Provider/SQLProvider.php', '/src/Search.php'),
     );
 
-    /** Relatório da última execução de applyAll(). */
+    /** Relatório da última execução de applyAll()/revertAll(): alvo => status. */
     private static $report = array();
+
+    /** Trechos que não entraram na última execução: alvo => [trecho, ...]. */
+    private static $missing = array();
 
     // -------------------------------------------------------------------------
     // API pública
@@ -43,56 +54,159 @@ class PluginStatusmanagerPatcher {
     /**
      * Aplica todos os patches.
      *
-     * @return array Relatório alvo => status ('patched', 'already', 'not_found', 'anchor_missing')
+     * Status possíveis por alvo:
+     *   patched        – gravado agora
+     *   already        – o arquivo já tem a marca do plugin
+     *   would_patch    – (dry-run) todos os trechos entrariam
+     *   not_found      – arquivo não existe nesta versão do GLPI
+     *   anchor_missing – algum trecho não achou a âncora; arquivo NÃO foi tocado
+     *   not_writable   – sem permissão de escrita no arquivo ou no diretório
+     *   syntax_error   – o resultado não passou na validação de sintaxe; arquivo NÃO foi tocado
+     *   write_failed   – falha ao gravar o backup ou o arquivo
+     *
+     * @param bool $dryRun Só simula: nada é gravado
+     * @return array Relatório alvo => status
      */
-    public static function applyAll() {
-        self::$report = array();
-        self::patchTicket();
-        self::patchProvider();
-        self::patchCommonITIL();
-        self::patchSearch();
+    public static function applyAll($dryRun = false) {
+        self::$report  = array();
+        self::$missing = array();
+        foreach (array_keys(self::$targets) as $target) {
+            self::$report[$target] = self::patchTarget($target, $dryRun);
+        }
         return self::$report;
     }
 
     /**
-     * Relatório da última chamada a applyAll().
+     * Relatório da última chamada a applyAll() ou revertAll().
      */
     public static function getReport() {
         return self::$report;
     }
 
+    /**
+     * Trechos que não entraram na última chamada a applyAll().
+     *
+     * @return array alvo => lista de nomes de trecho
+     */
+    public static function getMissing() {
+        return self::$missing;
+    }
+
+    /**
+     * Reverte todos os patches a partir dos backups.
+     *
+     * Status possíveis por alvo: reverted, original (sem patch; só o backup
+     * velho foi descartado), no_backup (tem patch mas não tem backup),
+     * not_found, write_failed.
+     *
+     * @return array Relatório alvo => status
+     */
     public static function revertAll() {
+        self::$report = array();
         foreach (array_keys(self::$targets) as $target) {
             $file = self::resolveFile($target);
             if ($file === null) {
+                self::$report[$target] = 'not_found';
                 continue;
             }
-            $bak = $file . '.statusmanager.bak';
+            $bak     = $file . '.statusmanager.bak';
+            $patched = strpos(file_get_contents($file), self::MARKER) !== false;
             if (!file_exists($bak)) {
+                self::$report[$target] = $patched ? 'no_backup' : 'original';
                 continue;
             }
             // Só restaura se o arquivo atual ainda tem o patch. Sem a marca,
             // o arquivo já é original — tipicamente porque o GLPI foi
             // atualizado — e o backup é de uma versão ANTERIOR do GLPI:
             // copiá-lo por cima quebraria a instalação.
-            if (strpos(file_get_contents($file), '[StatusManager]') !== false) {
-                copy($bak, $file);
+            if ($patched) {
+                $error = self::writeAtomic($file, file_get_contents($bak), false);
+                if ($error !== null) {
+                    self::$report[$target] = $error;
+                    continue;
+                }
+                self::$report[$target] = 'reverted';
+            } else {
+                self::$report[$target] = 'original';
             }
-            unlink($bak);
+            @unlink($bak);
         }
+        return self::$report;
     }
 
     /**
-     * Verifica se os patches já foram aplicados (checa Ticket.php).
+     * Situação de cada alvo no disco, sem alterar nada.
+     *
+     * @return array alvo => ['file' => caminho relativo|null, 'state' => patched|original|not_found,
+     *                        'backup' => bool, 'writable' => bool]
+     */
+    public static function status() {
+        $result = array();
+        foreach (array_keys(self::$targets) as $target) {
+            $file = self::resolveFile($target);
+            if ($file === null) {
+                $result[$target] = array('file' => null, 'state' => 'not_found', 'backup' => false, 'writable' => false);
+                continue;
+            }
+            $result[$target] = array(
+                'file'     => substr($file, strlen(self::glpiRoot()) + 1),
+                'state'    => strpos(file_get_contents($file), self::MARKER) !== false ? 'patched' : 'original',
+                'backup'   => file_exists($file . '.statusmanager.bak'),
+                'writable' => self::isWritable($file),
+            );
+        }
+        return $result;
+    }
+
+    /**
+     * Verifica se TODOS os alvos existentes estão patcheados.
+     *
+     * Checar só Ticket.php escondia o caso mais comum de quebra: uma
+     * atualização do GLPI troca parte do src/ e deixa os demais arquivos
+     * sem patch, com o painel ainda dizendo "Core patcheado".
      *
      * @return bool
      */
     public static function isApplied() {
-        $file = self::glpiRoot() . '/src/Ticket.php';
-        if (!file_exists($file)) {
-            return false;
+        $found = 0;
+        foreach (self::status() as $info) {
+            if ($info['state'] === 'not_found') {
+                continue;
+            }
+            if ($info['state'] !== 'patched') {
+                return false;
+            }
+            $found++;
         }
-        return strpos(file_get_contents($file), '[StatusManager]') !== false;
+        return $found > 0;
+    }
+
+    /**
+     * Indica se o processo atual consegue gravar todos os alvos.
+     * Quando o src/ é só leitura para o servidor web, os patches
+     * são aplicados pelo console (bin/console plugins:statusmanager:patch).
+     *
+     * @return bool
+     */
+    public static function canWrite() {
+        foreach (self::status() as $info) {
+            if ($info['state'] !== 'not_found' && !$info['writable']) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Nome amigável de cada alvo, para mensagens.
+     */
+    public static function getLabels() {
+        return array(
+            'ticket'   => 'Ticket.php',
+            'provider' => 'Dashboard/Provider.php',
+            'itil'     => 'CommonITILObject.php',
+            'search'   => 'barra de progresso do SLA',
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -123,56 +237,212 @@ class PluginStatusmanagerPatcher {
     }
 
     /**
-     * Faz backup do arquivo antes de aplicar o patch.
-     *
-     * Só é chamado quando o arquivo NÃO tem a marca [StatusManager], ou seja,
-     * está original. Por isso o backup é sempre renovado: um .bak que já
-     * exista nesse ponto sobrou de uma versão anterior do GLPI (a atualização
-     * troca src/ mas não apaga os .bak) e não pode ser mantido.
+     * A gravação é por arquivo temporário + rename no mesmo diretório,
+     * então o diretório também precisa aceitar escrita.
      */
-    private static function backup($file) {
-        copy($file, $file . '.statusmanager.bak');
+    private static function isWritable($file) {
+        return is_writable($file) && is_writable(dirname($file));
     }
 
     /**
-     * Substitui $search por $replace dentro de um método específico,
-     * identificado pela assinatura $methodSignature.
-     * Evita substituições acidentais em outros métodos homônimos.
+     * Aplica os trechos de um alvo e grava o arquivo, tudo ou nada.
      *
-     * @param string $content         Conteúdo completo do arquivo
-     * @param string $methodSignature Assinatura do método (ex: 'public static function foo(')
-     * @param string $search          Trecho a substituir
-     * @param string $replace         Novo trecho
-     * @return string                 Conteúdo modificado
+     * @return string Status do alvo (ver applyAll)
      */
-    private static function replaceInMethod($content, $methodSignature, $search, $replace) {
-        $methodPos = strpos($content, $methodSignature);
-        if ($methodPos === false) {
-            return $content;
+    private static function patchTarget($target, $dryRun) {
+        $file = self::resolveFile($target);
+        if ($file === null) {
+            return 'not_found';
+        }
+        $content = file_get_contents($file);
+        if (strpos($content, self::MARKER) !== false) {
+            return 'already';
         }
 
-        $start = strpos($content, '{', $methodPos);
-        $depth = 0;
-        $end   = $start;
-        $len   = strlen($content);
+        $new     = $content;
+        $missing = array();
+        foreach (self::hunks($target) as $name => $hunk) {
+            $result = self::applyHunk($new, $hunk);
+            if ($result === null) {
+                $missing[] = $name;
+            } else {
+                $new = $result;
+            }
+        }
+        if (!empty($missing)) {
+            self::$missing[$target] = $missing;
+            return 'anchor_missing';
+        }
+        if (!self::isValidSyntax($new)) {
+            return 'syntax_error';
+        }
+        if ($dryRun) {
+            return 'would_patch';
+        }
+        if (!self::isWritable($file)) {
+            return 'not_writable';
+        }
 
+        // O backup é sempre renovado: um .bak que já exista neste ponto
+        // (arquivo sem a marca, ou seja, original) sobrou de uma versão
+        // anterior do GLPI — a atualização troca src/ mas não apaga os
+        // .bak — e não pode ser mantido.
+        if (!@copy($file, $file . '.statusmanager.bak')) {
+            return 'write_failed';
+        }
+        $error = self::writeAtomic($file, $new, true);
+        return $error === null ? 'patched' : $error;
+    }
+
+    /**
+     * Grava $content em $file sem nunca deixar o arquivo pela metade:
+     * escreve num temporário ao lado, valida e só então troca por rename()
+     * (atômico no mesmo sistema de arquivos). Preserva permissões e, quando
+     * roda como root (console), o dono original.
+     *
+     * @return string|null null em caso de sucesso, ou o status de erro
+     */
+    private static function writeAtomic($file, $content, $validate) {
+        if ($validate && !self::isValidSyntax($content)) {
+            return 'syntax_error';
+        }
+        $tmp = $file . '.statusmanager.tmp';
+        if (@file_put_contents($tmp, $content) !== strlen($content)) {
+            @unlink($tmp);
+            return 'write_failed';
+        }
+        @chmod($tmp, fileperms($file) & 0777);
+        if (function_exists('posix_geteuid') && posix_geteuid() === 0) {
+            @chown($tmp, fileowner($file));
+            @chgrp($tmp, filegroup($file));
+        }
+        if (!@rename($tmp, $file)) {
+            @unlink($tmp);
+            return 'write_failed';
+        }
+        // Sem isto o PHP pode continuar servindo a versão antiga do arquivo
+        // em cache até o próximo revalidate (ou para sempre, se
+        // opcache.validate_timestamps=0).
+        if (function_exists('opcache_invalidate')) {
+            @opcache_invalidate($file, true);
+        }
+        return null;
+    }
+
+    /**
+     * Valida a sintaxe sem depender de exec()/php -l (costuma estar
+     * desabilitado no servidor web): TOKEN_PARSE monta a árvore sintática
+     * e lança ParseError se o código não compila.
+     */
+    private static function isValidSyntax($code) {
+        try {
+            token_get_all($code, TOKEN_PARSE);
+            return true;
+        } catch (ParseError $e) {
+            return false;
+        }
+    }
+
+    /**
+     * Limites [início, fim] do corpo de um método, ou null se não existir.
+     */
+    private static function methodBounds($content, $methodSignature) {
+        $methodPos = strpos($content, $methodSignature);
+        if ($methodPos === false) {
+            return null;
+        }
+        $start = strpos($content, '{', $methodPos);
+        if ($start === false) {
+            return null;
+        }
+        $depth = 0;
+        $len   = strlen($content);
         for ($i = $start; $i < $len; $i++) {
             if ($content[$i] === '{') {
                 $depth++;
             } elseif ($content[$i] === '}') {
                 $depth--;
                 if ($depth === 0) {
-                    $end = $i;
-                    break;
+                    return array($methodPos, $i);
                 }
             }
         }
+        return null;
+    }
 
-        $before = substr($content, 0, $methodPos);
-        $method = substr($content, $methodPos, $end - $methodPos + 1);
-        $after  = substr($content, $end + 1);
+    /**
+     * Aplica um trecho. Retorna o conteúdo novo, ou null se a âncora não
+     * aparecer exatamente uma vez no escopo (ou se o escopo tiver algo que
+     * torna o trecho inseguro, via 'unless').
+     *
+     * Formato do trecho:
+     *   method  – assinatura do método que delimita a busca (opcional)
+     *   anchor  – regex de UMA linha inteira; o grupo 1 captura a indentação
+     *   where   – 'before' ou 'after' da linha da âncora
+     *   code    – linhas a inserir, com indentação relativa à da âncora
+     *   unless  – regex que, se casar no escopo, aborta o trecho (opcional)
+     */
+    private static function applyHunk($content, array $hunk) {
+        $from = 0;
+        $to   = strlen($content) - 1;
+        if (!empty($hunk['method'])) {
+            $bounds = self::methodBounds($content, $hunk['method']);
+            if ($bounds === null) {
+                return null;
+            }
+            list($from, $to) = $bounds;
+        }
+        $scope = substr($content, $from, $to - $from + 1);
 
-        return $before . str_replace($search, $replace, $method) . $after;
+        if (!empty($hunk['unless']) && preg_match($hunk['unless'], $scope)) {
+            return null;
+        }
+        if (preg_match_all($hunk['anchor'], $scope, $m, PREG_OFFSET_CAPTURE) !== 1) {
+            return null;
+        }
+        $indent = $m[1][0][0];
+        $pos    = $m[0][0][1];
+
+        // Tira só a última quebra: uma linha em branco no fim do trecho é
+        // intencional (separa o bloco do código seguinte).
+        $code = $hunk['code'];
+        if (substr($code, -1) === "\n") {
+            $code = substr($code, 0, -1);
+        }
+        $lines = '';
+        foreach (explode("\n", $code) as $line) {
+            $lines .= ($line === '' ? '' : $indent . $line) . "\n";
+        }
+
+        if ($hunk['where'] === 'before') {
+            $at = $pos;
+        } else {
+            $eol = strpos($scope, "\n", $pos);
+            if ($eol === false) {
+                return null;
+            }
+            $at = $eol + 1;
+        }
+
+        return substr($content, 0, $from + $at) . $lines . substr($content, $from + $at);
+    }
+
+    // -------------------------------------------------------------------------
+    // Trechos por alvo
+    // -------------------------------------------------------------------------
+
+    private static function hunks($target) {
+        switch ($target) {
+            case 'ticket':
+                return self::hunksTicket();
+            case 'provider':
+                return self::hunksProvider();
+            case 'itil':
+                return self::hunksCommonITIL();
+            case 'search':
+                return self::hunksSearch();
+        }
+        return array();
     }
 
     // -------------------------------------------------------------------------
@@ -180,290 +450,158 @@ class PluginStatusmanagerPatcher {
     // Injeta status do plugin em getAllStatusArray, getClosedStatusArray,
     // getSolvedStatusArray e getProcessStatusArray.
     // -------------------------------------------------------------------------
-    private static function patchTicket() {
-        $file = self::resolveFile('ticket');
-        if ($file === null) {
-            self::$report['ticket'] = 'not_found';
-            return;
+    private static function hunksTicket() {
+        $hunks = array();
+
+        $hunks['getAllStatusArray'] = array(
+            'method' => 'public static function getAllStatusArray(',
+            'anchor' => '/^([ \t]*)if \(\$withmetaforsearch\) \{$/m',
+            'where'  => 'before',
+            'code'   => <<<'PHP'
+// [StatusManager] injeta status do plugin em runtime
+if (class_exists('PluginStatusmanagerRegistry')) {
+    foreach (PluginStatusmanagerRegistry::getAll() as $csKey => $csRow) {
+        $tab[(int)$csKey] = $csRow['name'];
+    }
+    foreach (array_keys($tab) as $nKey) {
+        $nlabel = PluginStatusmanagerRegistry::getNativeLabel($nKey);
+        if ($nlabel !== null) {
+            $tab[$nKey] = $nlabel;
         }
-        $content = file_get_contents($file);
-        if (strpos($content, '[StatusManager]') !== false) {
-            self::$report['ticket'] = 'already';
-            return;
+    }
+    foreach (PluginStatusmanagerRegistry::getHiddenNativeKeys() as $hKey) {
+        unset($tab[$hKey]);
+    }
+}
+
+PHP
+        );
+
+        // As três listas por comportamento seguem o mesmo molde: o código
+        // entra antes do return original, que continua lá como fallback
+        // quando o plugin está desativado.
+        $groups = array(
+            'getClosedStatusArray'  => array('self::CLOSED', 'closed'),
+            'getSolvedStatusArray'  => array('self::SOLVED', 'solved'),
+            'getProcessStatusArray' => array('self::ASSIGNED, self::PLANNED', 'assigned'),
+        );
+        foreach ($groups as $method => $group) {
+            list($natives, $behavior) = $group;
+            $hunks[$method] = array(
+                'method' => 'public static function ' . $method . '(',
+                'anchor' => '/^([ \t]*)return \[' . preg_quote($natives, '/') . '\];$/m',
+                'where'  => 'before',
+                'code'   => "// [StatusManager] status do plugin com comportamento '{$behavior}'\n"
+                    . "if (class_exists('PluginStatusmanagerRegistry')) {\n"
+                    . "    return array_values(array_unique(array_merge([{$natives}], PluginStatusmanagerRegistry::getKeysByBehavior('{$behavior}'))));\n"
+                    . "}\n",
+            );
         }
-        self::backup($file);
-        $original = $content;
 
-        // getAllStatusArray: injeta custom + renomeia + oculta nativos
-        $content = self::replaceInMethod(
-            $content,
-            'public static function getAllStatusArray(',
-            'if ($withmetaforsearch) {',
-            '// [StatusManager] injeta status do plugin em runtime' . "\n"
-            . '        if (class_exists(\'PluginStatusmanagerRegistry\')) {' . "\n"
-            . '            foreach (PluginStatusmanagerRegistry::getAll() as $csKey => $csRow) {' . "\n"
-            . '                $tab[(int)$csKey] = $csRow[\'name\'];' . "\n"
-            . '            }' . "\n"
-            . '            foreach (array_keys($tab) as $nKey) {' . "\n"
-            . '                $nlabel = PluginStatusmanagerRegistry::getNativeLabel($nKey);' . "\n"
-            . '                if ($nlabel !== null) { $tab[$nKey] = $nlabel; }' . "\n"
-            . '            }' . "\n"
-            . '            foreach (PluginStatusmanagerRegistry::getHiddenNativeKeys() as $hKey) {' . "\n"
-            . '                unset($tab[$hKey]);' . "\n"
-            . '            }' . "\n"
-            . '        }' . "\n\n"
-            . '        if ($withmetaforsearch) {'
-        );
-
-        // getClosedStatusArray
-        $content = self::replaceInMethod(
-            $content,
-            'public static function getClosedStatusArray(',
-            'return [self::CLOSED];',
-            '// [StatusManager]' . "\n"
-            . '        $extra = class_exists(\'PluginStatusmanagerRegistry\') ? PluginStatusmanagerRegistry::getKeysByBehavior(\'closed\') : [];' . "\n"
-            . '        return array_unique(array_merge([self::CLOSED], $extra));'
-        );
-
-        // getSolvedStatusArray
-        $content = self::replaceInMethod(
-            $content,
-            'public static function getSolvedStatusArray(',
-            'return [self::SOLVED];',
-            '// [StatusManager]' . "\n"
-            . '        $extra = class_exists(\'PluginStatusmanagerRegistry\') ? PluginStatusmanagerRegistry::getKeysByBehavior(\'solved\') : [];' . "\n"
-            . '        return array_unique(array_merge([self::SOLVED], $extra));'
-        );
-
-        // getProcessStatusArray
-        $content = self::replaceInMethod(
-            $content,
-            'public static function getProcessStatusArray(',
-            'return [self::ASSIGNED, self::PLANNED];',
-            '// [StatusManager]' . "\n"
-            . '        $extra = class_exists(\'PluginStatusmanagerRegistry\') ? PluginStatusmanagerRegistry::getKeysByBehavior(\'assigned\') : [];' . "\n"
-            . '        return array_unique(array_merge([self::ASSIGNED, self::PLANNED], $extra));'
-        );
-
-        self::$report['ticket'] = ($content === $original) ? 'anchor_missing' : 'patched';
-        file_put_contents($file, $content);
+        return $hunks;
     }
 
     // -------------------------------------------------------------------------
     // Patch 2 – Dashboard/Provider.php
     // Adiciona case default em nbTicketsGeneric para status numéricos dinâmicos.
     // -------------------------------------------------------------------------
-    private static function patchProvider() {
-        $file = self::resolveFile('provider');
-        if ($file === null) {
-            self::$report['provider'] = 'not_found';
-            return;
-        }
-        $content = file_get_contents($file);
-        if (strpos($content, '[StatusManager]') !== false) {
-            self::$report['provider'] = 'already';
-            return;
-        }
-        self::backup($file);
-        $original = $content;
+    private static function hunksProvider() {
+        return array(
+            'nbTicketsGeneric' => array(
+                'method' => 'public static function nbTicketsGeneric(',
+                // A chave que fecha o switch, logo antes da montagem dos filtros:
+                //   GLPI 10.0.x antigo -> $search_criteria['criteria'] = self::getSearchFiltersCriteria
+                //   GLPI 10.0.28/11/12 -> $filter_criteria = self::getSearchFiltersCriteria
+                'anchor' => '/^([ \t]*)\}\n(?=\s*(?:\$filter_criteria|\$search_criteria\[\'criteria\'\]) = self::getSearchFiltersCriteria)/m',
+                'where'  => 'before',
+                // Um segundo `default:` no mesmo switch é erro de compilação
+                // que a validação de sintaxe não pega. Se o core passar a ter
+                // um, o trecho não entra.
+                'unless' => '/^\s*default\s*:/m',
+                'code'   => <<<'PHP'
 
-        // O corpo do case default é igual nas duas versões; o que muda é a
-        // linha logo após o fechamento do switch:
-        //   GLPI 10 -> $search_criteria['criteria'] = self::getSearchFiltersCriteria
-        //   GLPI 11 -> $filter_criteria = self::getSearchFiltersCriteria
-        $tails = array(
-            "        \$filter_criteria = self::getSearchFiltersCriteria",          // GLPI 11
-            "        \$search_criteria['criteria'] = self::getSearchFiltersCriteria", // GLPI 10
-        );
-
-        $defaultCase = "                break;\n\n"
-            . "            // [StatusManager] status numéricos dinâmicos do plugin\n"
-            . "            default:\n"
-            . "                if (class_exists('PluginStatusmanagerRegistry') && is_numeric(\$case)) {\n"
-            . "                    \$csKey = (int)\$case;\n"
-            . "                    \$csRow = PluginStatusmanagerRegistry::getRow(\$csKey);\n"
-            . "                    if (\$csRow) {\n"
-            . "                        \$status = \$csKey;\n"
-            . "                        \$params['icon']  = htmlspecialchars(\$csRow['icon']);\n"
-            . "                        \$params['label'] = htmlspecialchars(\$csRow['name']);\n"
-            . "                        \$search_criteria = [['field' => 12, 'searchtype' => 'equals', 'value' => \$status]];\n"
-            . "                        \$query_criteria  = array_merge_recursive(\$query_criteria, ['WHERE' => [\"\$table.status\" => \$status]]);\n"
-            . "                    }\n"
-            . "                }\n"
-            . "                break;\n"
-            . "        }\n\n";
-
-        foreach ($tails as $tail) {
-            $search  = "                break;\n        }\n\n" . $tail;
-            $replace = $defaultCase . $tail;
-
-            $candidate = self::replaceInMethod($content, 'public static function nbTicketsGeneric(', $search, $replace);
-            if ($candidate !== $content) {
-                $content = $candidate;
-                break;
+    // [StatusManager] status numéricos dinâmicos do plugin
+    default:
+        if (class_exists('PluginStatusmanagerRegistry') && is_numeric($case)) {
+            $csKey = (int)$case;
+            $csRow = PluginStatusmanagerRegistry::getRow($csKey);
+            if ($csRow) {
+                $status = $csKey;
+                $params['icon']  = htmlspecialchars($csRow['icon']);
+                $params['label'] = htmlspecialchars($csRow['name']);
+                $search_criteria = [['field' => 12, 'searchtype' => 'equals', 'value' => $status]];
+                $query_criteria  = array_merge_recursive($query_criteria, ['WHERE' => ["$table.status" => $status]]);
             }
         }
-
-        self::$report['provider'] = ($content === $original) ? 'anchor_missing' : 'patched';
-        file_put_contents($file, $content);
+        break;
+PHP
+            ),
+        );
     }
 
     // -------------------------------------------------------------------------
     // Patch 3 – CommonITILObject.php
-    // a) getStatusClass: retorna ícone do plugin para status desconhecidos
-    // b) Pausa SLA: expande condição de begin_waiting_date para status pending
-    // c) Reset SLA: expande condição de reset ao sair de status pending
+    // a) getStatusClass: ícone do plugin para status do plugin e nativos com ícone próprio
+    // b) Pausa SLA: inclui status pending do plugin na condição de begin_waiting_date
+    // c) Retomada SLA: inclui status pending do plugin na saída da espera
     // -------------------------------------------------------------------------
-    private static function patchCommonITIL() {
-        $file = self::resolveFile('itil');
-        if ($file === null) {
-            self::$report['itil'] = 'not_found';
-            return;
-        }
-        $content = file_get_contents($file);
-        if (strpos($content, '[StatusManager]') !== false) {
-            self::$report['itil'] = 'already';
-            return;
-        }
-        self::backup($file);
-        $original = $content;
+    private static function hunksCommonITIL() {
+        return array(
+            // A âncora é o return final, que muda de forma entre versões:
+            //   GLPI 10:    return $class == null ? '' : 'itilstatus ' . ($solid ? 'fas fa-' ...
+            //   GLPI 11/12: return $class === null ? '' : 'itilstatus ti ti-' . $class ...
+            // Casar a linha inteira do 11 deixava o GLPI 10 sem ícone.
+            'getStatusClass' => array(
+                'method' => 'public static function getStatusClass(',
+                'anchor' => '/^([ \t]*)return \$class ===? null\b.*$/m',
+                'where'  => 'before',
+                'code'   => <<<'PHP'
+// [StatusManager] ícone dos status do plugin e dos nativos com ícone próprio
+if (class_exists('PluginStatusmanagerRegistry')) {
+    $csRow = PluginStatusmanagerRegistry::getRow((int)$status);
+    if ($csRow && ($class === null || $class === '')) {
+        return 'itilstatus ' . PluginStatusmanagerRegistry::iconClass($csRow['icon']) . ' cs-status-' . (int)$status;
+    }
+    $nvIcon = PluginStatusmanagerRegistry::getNativeIcon((int)$status);
+    if ($nvIcon !== null) {
+        return 'itilstatus ' . PluginStatusmanagerRegistry::iconClass($nvIcon) . ' cs-status-' . (int)$status;
+    }
+}
 
-        // (a) getStatusClass – ícone dinâmico (GLPI 11: match + ti ti-)
-        $search  = "        return \$class === null ? '' : 'itilstatus ti ti-' . \$class . \" \" . static::getStatusKey(\$status);";
-        // Atenção à condição: no GLPI 10 o match/switch deixava $class como
-        // string vazia para status desconhecido; no 11 o `default` devolve
-        // null. Testar só por '' faz este ramo virar código morto no 11 —
-        // o status existe, grava, aparece na lista, e sai sem ícone.
-        $replace = "        // [StatusManager] ícone dinâmico do plugin\n"
-                 . "        if ((\$class === '' || \$class === null) && class_exists('PluginStatusmanagerRegistry')) {\n"
-                 . "            \$csRow = PluginStatusmanagerRegistry::getRow((int)\$status);\n"
-                 . "            if (\$csRow) {\n"
-                 . "                return 'itilstatus ti ' . \$csRow['icon'] . ' cs-status-' . (int)\$status;\n"
-                 . "            }\n"
-                 . "        }\n"
-                 . "        // [StatusManager] ícone customizado de status NATIVO rebatizado\n"
-                 . "        if (class_exists('PluginStatusmanagerRegistry')) {\n"
-                 . "            \$nvIcon = PluginStatusmanagerRegistry::getNativeIcon((int)\$status);\n"
-                 . "            if (\$nvIcon !== null) {\n"
-                 . "                return 'itilstatus ti ' . \$nvIcon . ' cs-status-' . (int)\$status;\n"
-                 . "            }\n"
-                 . "        }\n"
-                 . "        return \$class === null ? '' : 'itilstatus ti ti-' . \$class . \" \" . static::getStatusKey(\$status);";
-        $content = self::replaceInMethod($content, 'public static function getStatusClass(', $search, $replace);
-
-        // (b) Pausa SLA – "Set begin waiting date if needed"
-        // Tenta os dois formatos conhecidos do bloco
-        $patternsSet = array(
-            "((\$key = array_search('status', \$this->updates)) !== false)\n"
-            . "            &&\n"
-            . "            (\n"
-            . "                (\$this->fields['status'] == self::WAITING)",
-            "((\$key = array_search('status', \$this->updates)) !== false)\n"
-            . "            && ((\$this->fields['status'] == self::WAITING)",
+PHP
+            ),
+            // "Set begin waiting date if needed" (10/11) / "handle levels" (12)
+            'pausaSLA' => array(
+                'anchor' => '/^([ \t]*)&& \(\(\$this->fields\[\'status\'\] == self::WAITING\)$/m',
+                'where'  => 'after',
+                'code'   => "  // [StatusManager] pausa SLA para behavior=pending do plugin\n"
+                    . "  || (class_exists('PluginStatusmanagerRegistry') && in_array(\$this->fields['status'], PluginStatusmanagerRegistry::getKeysByBehavior('pending')))\n",
+            ),
+            // "Manage come back to waiting state"
+            'retomadaSLA' => array(
+                'anchor' => '/^([ \t]*)\$this->oldvalues\[\'status\'\] == self::WAITING$/m',
+                'where'  => 'after',
+                'code'   => "// [StatusManager] reset ao sair de pending do plugin\n"
+                    . "|| (class_exists('PluginStatusmanagerRegistry') && in_array(\$this->oldvalues['status'], PluginStatusmanagerRegistry::getKeysByBehavior('pending')))\n",
+            ),
         );
-        $injectPending = "\n"
-            . "              // [StatusManager] pausa SLA para behavior=pending do plugin\n"
-            . "              || (class_exists('PluginStatusmanagerRegistry')\n"
-            . "                  && in_array(\$this->fields['status'], PluginStatusmanagerRegistry::getKeysByBehavior('pending')))";
-
-        $patched = false;
-        foreach ($patternsSet as $pat) {
-            if (strpos($content, $pat) !== false) {
-                $content = str_replace($pat, $pat . $injectPending, $content);
-                $patched = true;
-                break;
-            }
-        }
-        // Fallback: substitui apenas a linha-chave
-        if (!$patched) {
-            $content = str_replace(
-                "(\$this->fields['status'] == self::WAITING)\n              || in_array",
-                "(\$this->fields['status'] == self::WAITING)\n"
-                . "              // [StatusManager] pausa SLA para behavior=pending do plugin\n"
-                . "              || (class_exists('PluginStatusmanagerRegistry') && in_array(\$this->fields['status'], PluginStatusmanagerRegistry::getKeysByBehavior('pending')))\n"
-                . "              || in_array",
-                $content
-            );
-        }
-
-        // (c) Reset SLA – ao sair de status pending
-        // Tenta com || no final (formato mais comum)
-        $r1 = str_replace(
-            "\$this->oldvalues['status'] == self::WAITING || \n",
-            "\$this->oldvalues['status'] == self::WAITING || \n"
-            . "            // [StatusManager] reset ao sair de pending do plugin\n"
-            . "            (class_exists('PluginStatusmanagerRegistry') && in_array(\$this->oldvalues['status'], PluginStatusmanagerRegistry::getKeysByBehavior('pending'))) || \n",
-            $content
-        );
-        if ($r1 !== $content) {
-            $content = $r1;
-        } else {
-            // Fallback sem trailing ||
-            $content = str_replace(
-                "\$this->oldvalues['status'] == self::WAITING\n",
-                "\$this->oldvalues['status'] == self::WAITING\n"
-                . "            // [StatusManager] reset ao sair de pending do plugin\n"
-                . "            || (class_exists('PluginStatusmanagerRegistry') && in_array(\$this->oldvalues['status'], PluginStatusmanagerRegistry::getKeysByBehavior('pending')))\n",
-                $content
-            );
-        }
-
-        self::$report['itil'] = ($content === $original) ? 'anchor_missing' : 'patched';
-        file_put_contents($file, $content);
     }
 
     // -------------------------------------------------------------------------
-    // Patch 4 – Search.php
+    // Patch 4 – Search.php / SQLProvider.php
     // Oculta barra de progresso do SLA quando o status é pending do plugin.
+    // A âncora é só a linha da comparação com WAITING: o bloco em volta
+    // mudou no GLPI 12 (saiu internal_time_to_resolve) e casar o bloco
+    // inteiro deixava o patch de fora.
     // -------------------------------------------------------------------------
-    private static function patchSearch() {
-        $file = self::resolveFile('search');
-        if ($file === null) {
-            self::$report['search'] = 'not_found';
-            return;
-        }
-        $content = file_get_contents($file);
-        if (strpos($content, '[StatusManager] no progress bar') !== false) {
-            self::$report['search'] = 'already';
-            return;
-        }
-        self::backup($file);
-        $original = $content;
-
-        $search  = "                        if (\n"
-                 . "                            \$data[\$ID][0]['status'] == CommonITILObject::WAITING\n"
-                 . "                        ) {\n"
-                 . "                            // No due date in waiting status for TTRs\n"
-                 . "                            if (\n"
-                 . "                                \$table . '.' . \$field == \"glpi_tickets.time_to_resolve\"\n"
-                 . "                                || \$table . '.' . \$field == \"glpi_tickets.internal_time_to_resolve\"\n"
-                 . "                            ) {\n"
-                 . "                                return '';\n"
-                 . "                            } else {\n"
-                 . "                                \$color = '#AAAAAA';\n"
-                 . "                            }\n"
-                 . "                        }";
-
-        $replace = "                        if (\n"
-                 . "                            \$data[\$ID][0]['status'] == CommonITILObject::WAITING\n"
-                 . "                            // [StatusManager] no progress bar para status pending do plugin\n"
-                 . "                            || (class_exists('PluginStatusmanagerRegistry')\n"
-                 . "                                && in_array(\$data[\$ID][0]['status'], PluginStatusmanagerRegistry::getKeysByBehavior('pending')))\n"
-                 . "                        ) {\n"
-                 . "                            // No due date in waiting status for TTRs\n"
-                 . "                            if (\n"
-                 . "                                \$table . '.' . \$field == \"glpi_tickets.time_to_resolve\"\n"
-                 . "                                || \$table . '.' . \$field == \"glpi_tickets.internal_time_to_resolve\"\n"
-                 . "                            ) {\n"
-                 . "                                return '';\n"
-                 . "                            } else {\n"
-                 . "                                \$color = '#AAAAAA';\n"
-                 . "                            }\n"
-                 . "                        }";
-
-        $content = str_replace($search, $replace, $content);
-
-        self::$report['search'] = ($content === $original) ? 'anchor_missing' : 'patched';
-        file_put_contents($file, $content);
+    private static function hunksSearch() {
+        return array(
+            'barraSLA' => array(
+                'anchor' => '/^([ \t]*)\$data\[\$ID\]\[0\]\[\'status\'\] == CommonITILObject::WAITING$/m',
+                'where'  => 'after',
+                'code'   => "// [StatusManager] no progress bar para status pending do plugin\n"
+                    . "|| (class_exists('PluginStatusmanagerRegistry') && in_array(\$data[\$ID][0]['status'], PluginStatusmanagerRegistry::getKeysByBehavior('pending')))\n",
+            ),
+        );
     }
 }

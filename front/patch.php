@@ -18,22 +18,37 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 $action = isset($_POST['action']) ? $_POST['action'] : '';
 
 try {
-    if ($action === 'apply') {
-        $report = PluginStatusmanagerPatcher::applyAll();
+    $labels  = PluginStatusmanagerPatcher::getLabels();
+    $console = 'php bin/console plugins:statusmanager:patch ' . ($action === 'revert' ? 'revert' : 'apply');
 
-        $labels = array(
-            'ticket'   => 'Ticket.php',
-            'provider' => 'Dashboard/Provider.php',
-            'itil'     => 'CommonITILObject.php',
-            'search'   => 'barra de progresso do SLA',
-        );
+    if ($action === 'apply') {
+        $report  = PluginStatusmanagerPatcher::applyAll();
+        $missing = PluginStatusmanagerPatcher::getMissing();
+
         $problemas = array();
         foreach ($report as $alvo => $status) {
-            if ($status === 'not_found') {
-                $problemas[] = $labels[$alvo] . ': arquivo não encontrado nesta versão do GLPI';
-            } elseif ($status === 'anchor_missing') {
-                $problemas[] = $labels[$alvo] . ': trecho esperado não encontrado (o core mudou)';
+            switch ($status) {
+                case 'not_found':
+                    // Normal para alvos que não existem nesta versão; só é
+                    // problema se nenhum outro arquivo foi encontrado.
+                    break;
+                case 'anchor_missing':
+                    $problemas[] = $labels[$alvo] . ': trecho esperado não encontrado (o core mudou) em '
+                        . implode(', ', $missing[$alvo]) . ' — arquivo não foi alterado';
+                    break;
+                case 'not_writable':
+                    $problemas[] = $labels[$alvo] . ': sem permissão de escrita para o servidor web';
+                    break;
+                case 'syntax_error':
+                    $problemas[] = $labels[$alvo] . ': o resultado não passou na validação de sintaxe — arquivo não foi alterado';
+                    break;
+                case 'write_failed':
+                    $problemas[] = $labels[$alvo] . ': falha ao gravar';
+                    break;
             }
+        }
+        if (!in_array('patched', $report, true) && !in_array('already', $report, true) && empty($problemas)) {
+            $problemas[] = 'nenhum arquivo do core foi encontrado nesta versão do GLPI';
         }
 
         // GLPI 11: garante que os status do plugin entrem na lista branca
@@ -48,17 +63,36 @@ try {
         } else {
             // Nunca declarar sucesso quando algum patch não entrou: um patch
             // silenciosamente ignorado quebra dashboard/SLA sem aviso nenhum.
+            $dica = in_array('not_writable', $report, true)
+                ? ' | Com o src/ só leitura, aplique pelo console, como root: ' . $console
+                : '';
             Session::addMessageAfterRedirect(
-                'Alguns patches NÃO foram aplicados: ' . implode(' | ', $problemas),
+                'Alguns patches NÃO foram aplicados: ' . implode(' | ', $problemas) . $dica,
                 false, ERROR
             );
         }
     } elseif ($action === 'revert') {
-        PluginStatusmanagerPatcher::revertAll();
-        Session::addMessageAfterRedirect(
-            'Patches revertidos. Arquivos originais restaurados dos backups.',
-            false, INFO
-        );
+        $report = PluginStatusmanagerPatcher::revertAll();
+
+        $problemas = array();
+        foreach ($report as $alvo => $status) {
+            if ($status === 'no_backup') {
+                $problemas[] = $labels[$alvo] . ': tem patch mas não tem backup — reinstale o arquivo original do GLPI';
+            } elseif ($status === 'write_failed') {
+                $problemas[] = $labels[$alvo] . ': falha ao gravar (sem permissão?)';
+            }
+        }
+        if (empty($problemas)) {
+            Session::addMessageAfterRedirect(
+                'Patches revertidos. Arquivos originais restaurados dos backups.',
+                false, INFO
+            );
+        } else {
+            Session::addMessageAfterRedirect(
+                'A reversão não foi completa: ' . implode(' | ', $problemas) . ' | Pelo console: ' . $console,
+                false, ERROR
+            );
+        }
     }
 } catch (Throwable $e) {
     Session::addMessageAfterRedirect('Erro ao processar patches: ' . $e->getMessage(), false, ERROR);

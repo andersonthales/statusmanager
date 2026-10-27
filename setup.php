@@ -12,7 +12,7 @@
  * ---------------------------------------------------------------------
  */
 
-define('PLUGIN_STATUSMANAGER_VERSION',  '3.4.3');
+define('PLUGIN_STATUSMANAGER_VERSION',  '3.5.0');
 define('PLUGIN_STATUSMANAGER_MIN_GLPI', '10.0.0');
 define('PLUGIN_STATUSMANAGER_MAX_GLPI', '11.1.99');
 define('PLUGIN_STATUSMANAGER_KEY_OFFSET', 200); // status_keys dos custom começam aqui
@@ -66,6 +66,9 @@ function plugin_init_statusmanager() {
     $PLUGIN_HOOKS['add_javascript']['statusmanager'] = $asset_prefix . 'js/statusmanager.js';
     $PLUGIN_HOOKS['post_init']['statusmanager']      = 'plugin_statusmanager_post_init';
     $PLUGIN_HOOKS['config_page']['statusmanager']    = 'front/config.php';
+    // Aviso na página inicial quando os patches sumiram (ex.: depois de
+    // atualizar o GLPI, que troca o src/ e apaga as alterações do plugin)
+    $PLUGIN_HOOKS['display_central']['statusmanager'] = 'plugin_statusmanager_display_central';
 }
 
 function plugin_statusmanager_post_init() {
